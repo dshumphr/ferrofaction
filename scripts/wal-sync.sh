@@ -1,8 +1,8 @@
 #!/bin/bash
 # wal-sync.sh: WAL sync hook for Gemini CLI
 #
-# Syncs the local .gemini/ state directory to a cloud bucket (S3 or GCS)
-# after every tool call, providing a durable write-ahead log.
+# Syncs the active session file to a cloud bucket (S3 or GCS) after every
+# tool call, providing a durable write-ahead log.
 #
 # Registered as BeforeTool and AfterTool in .gemini/settings.json.
 #
@@ -45,9 +45,13 @@ else
     exit 1
 fi
 
+# Find the most recently modified session file in LOCAL_STATE
+active_session_file() {
+    ls -t "$LOCAL_STATE"/session-*.json 2>/dev/null | head -1
+}
+
 flush_gemini_files() {
-    # Find any session JSON files that gemini has open in LOCAL_STATE and fsync them
-    # so the OS kernel buffers are flushed to disk before we rsync to the bucket.
+    # fsync the active session file so kernel buffers are on disk before we upload.
     local pids
     pids=$(pgrep -x gemini 2>/dev/null || true)
     if [ -z "$pids" ]; then
@@ -75,23 +79,30 @@ for path in sys.argv[1:]:
 }
 
 sync_to_bucket() {
+    local src="$1"
+    local filename
+    filename=$(basename "$src")
+
     if [ "$BACKEND" = "s3" ]; then
-        aws s3 sync "$LOCAL_STATE/" "$BUCKET/state/" \
-            --exact-timestamps \
+        aws s3 cp "$src" "$BUCKET/state/$filename" \
             --no-progress \
             2>&1
     else
-        gcloud storage rsync \
-            --recursive \
-            --delete-unmatched-destination-objects \
-            "$LOCAL_STATE/" "$BUCKET/state/" \
+        gcloud storage cp "$src" "$BUCKET/state/$filename" \
             2>&1
     fi
 }
 
+SESSION_FILE=$(active_session_file)
+
+if [ -z "$SESSION_FILE" ]; then
+    echo '{"decision": "allow"}'
+    exit 0
+fi
+
 flush_gemini_files
 
-if ! sync_to_bucket; then
+if ! sync_to_bucket "$SESSION_FILE"; then
     echo '{"decision": "deny", "reason": "WAL sync to bucket failed, aborting tool execution to prevent state divergence."}'
     exit 1
 fi
