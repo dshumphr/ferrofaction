@@ -2,7 +2,7 @@
   "hooks": {
     "BeforeTool": [
       {
-        "matcher": "*",
+        "matcher": "^(?!get_time$|get_weather$|glob$|grep$|list_directory$|read_file$|search_file_content$|web_fetch$|web_search$).*$",
         "hooks": [
           {
             "name": "wal-presync",
