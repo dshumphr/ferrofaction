@@ -1,62 +1,98 @@
 #!/bin/bash
-# wal-sync.sh: Synchronous explicit fsync for agent state
+# wal-sync.sh: WAL sync hook for Gemini CLI
 #
-# This script is invoked as a BeforeTool and AfterTool hook by Gemini CLI.
-# It forces an OS-level fsync on all files in the agent state directory,
-# ensuring that pending writes are committed to the remote NFS storage
-# before or after any tool execution.
+# Syncs the local .gemini/ state directory to a cloud bucket (S3 or GCS)
+# after every tool call, providing a durable write-ahead log.
 #
-# On NFSv3/v4 (AWS EFS, GCP Filestore, Azure NetApp Files), this causes
-# the NFS client to issue a COMMIT RPC to the remote server, blocking until
-# the storage array acknowledges the write to stable storage.
+# Registered as BeforeTool and AfterTool in .gemini/settings.json.
+#
+# Required environment variables:
+#   FERROFACTION_BUCKET   Bucket URL, e.g. s3://my-bucket/agent or gs://my-bucket/agent
+#
+# Optional environment variables:
+#   FERROFACTION_LOCAL_STATE   Local state directory to sync (default: ~/.gemini)
 #
 # Exit behavior:
-#   - On fsync success: prints {"decision": "allow"} and exits 0
-#   - On fsync failure (except ENOENT): prints {"decision": "deny"} and exits 1
-#     This halts the agent loop, preventing state corruption.
+#   - On sync success: prints {"decision": "allow"} and exits 0
+#   - On sync failure: prints {"decision": "deny"} and exits 1
+#     This halts the agent loop, preventing it from proceeding with unsynced state.
 
-STATE_DIR="${GEMINI_STATE_DIR:-/mnt/agent-state/.gemini}"
+set -euo pipefail
 
-python3 -c '
-import os, sys, errno
+BUCKET="${FERROFACTION_BUCKET:-}"
+LOCAL_STATE="${FERROFACTION_LOCAL_STATE:-$HOME/.gemini}"
 
-state_dir = sys.argv[1]
+if [ -z "$BUCKET" ]; then
+    echo "WAL sync error: FERROFACTION_BUCKET is not set." >&2
+    echo '{"decision": "deny", "reason": "FERROFACTION_BUCKET is not set."}'
+    exit 1
+fi
 
-# 1. fsync the contents of all files in the state directory
-try:
-    for filename in os.listdir(state_dir):
-        filepath = os.path.join(state_dir, filename)
-        if os.path.isfile(filepath):
-            try:
-                # O_RDONLY is sufficient and intentional; write permission is
-                # not required to fsync a file descriptor.
-                fd = os.open(filepath, os.O_RDONLY)
-                os.fsync(fd)
-                os.close(fd)
-            except OSError as e:
-                # Only ignore ENOENT (transient files deleted mid-flight)
-                if e.errno != errno.ENOENT:
-                    print(f"WAL fsync failed on {filepath}: {e}", file=sys.stderr)
-                    sys.exit(1)
-except OSError as e:
-    print(f"WAL directory listing failed: {e}", file=sys.stderr)
-    sys.exit(1)
+if [ ! -d "$LOCAL_STATE" ]; then
+    echo "WAL sync error: local state directory '$LOCAL_STATE' does not exist." >&2
+    echo '{"decision": "deny", "reason": "Local state directory does not exist."}'
+    exit 1
+fi
 
-# 2. fsync the directory to guarantee metadata (new files/deletions) is committed
-try:
-    dir_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY)
-    os.fsync(dir_fd)
-    os.close(dir_fd)
-except OSError as e:
-    print(f"WAL directory sync failed: {e}", file=sys.stderr)
-    sys.exit(1)
-' "$STATE_DIR" >&2
+# Detect backend from bucket URL prefix
+if [[ "$BUCKET" == s3://* ]]; then
+    BACKEND="s3"
+elif [[ "$BUCKET" == gs://* ]]; then
+    BACKEND="gcs"
+else
+    echo "WAL sync error: unrecognized bucket URL '$BUCKET'. Must start with s3:// or gs://" >&2
+    echo '{"decision": "deny", "reason": "Unrecognized bucket URL scheme."}'
+    exit 1
+fi
 
-PY_EXIT=$?
+flush_gemini_files() {
+    # Find any session JSON files that gemini has open in LOCAL_STATE and fsync them
+    # so the OS kernel buffers are flushed to disk before we rsync to the bucket.
+    local pids
+    pids=$(pgrep -x gemini 2>/dev/null || true)
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+    local open_files
+    open_files=$(lsof -p "$(echo "$pids" | tr '\n' ',')" 2>/dev/null \
+        | awk '{print $NF}' \
+        | grep -F "$LOCAL_STATE" \
+        | grep '\.json$' \
+        | sort -u || true)
+    if [ -z "$open_files" ]; then
+        return 0
+    fi
+    python3 -c "
+import os, sys
+for path in sys.argv[1:]:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        os.fsync(fd)
+        os.close(fd)
+    except OSError:
+        pass
+" $open_files
+}
 
-if [ $PY_EXIT -ne 0 ]; then
-    # If fsync fails, strictly deny execution to prevent state divergence
-    echo '{"decision": "deny", "reason": "WAL fsync failed, aborting tool execution to prevent state corruption."}'
+sync_to_bucket() {
+    if [ "$BACKEND" = "s3" ]; then
+        aws s3 sync "$LOCAL_STATE/" "$BUCKET/state/" \
+            --exact-timestamps \
+            --no-progress \
+            2>&1
+    else
+        gcloud storage rsync \
+            --recursive \
+            --delete-unmatched-destination-objects \
+            "$LOCAL_STATE/" "$BUCKET/state/" \
+            2>&1
+    fi
+}
+
+flush_gemini_files
+
+if ! sync_to_bucket; then
+    echo '{"decision": "deny", "reason": "WAL sync to bucket failed, aborting tool execution to prevent state divergence."}'
     exit 1
 fi
 

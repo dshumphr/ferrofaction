@@ -7,7 +7,7 @@
           {
             "name": "wal-presync",
             "type": "command",
-            "command": "/usr/local/bin/wal-sync.sh"
+            "command": "FERROFACTION_BUCKET=gs://ferrofaction-test/agent FERROFACTION_LOCAL_STATE=${HOME}/.gemini/tmp/ferrofaction/chats /Users/danielhumphries/src/ferrofaction/scripts/wal-sync.sh"
           }
         ]
       }
@@ -19,7 +19,7 @@
           {
             "name": "wal-postsync",
             "type": "command",
-            "command": "/usr/local/bin/wal-sync.sh"
+            "command": "FERROFACTION_BUCKET=gs://ferrofaction-test/agent FERROFACTION_LOCAL_STATE=${HOME}/.gemini/tmp/ferrofaction/chats /Users/danielhumphries/src/ferrofaction/scripts/wal-sync.sh"
           }
         ]
       }
