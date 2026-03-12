@@ -55,6 +55,69 @@ vm-wrapper.sh [gemini-cli-args...]
 
 ---
 
+## Helping the agent recover from mid-tool crashes
+
+When a crash happens during a tool call, the recovered session ends with a `functionCall` entry but no corresponding `functionResponse`. The agent receives a generic recovery prompt and must figure out what to do. Out of the box it applies the rules in `GEMINI.md` — but those rules are general-purpose. You can make recovery significantly smarter by giving the agent tool-specific knowledge.
+
+### Option 1: Annotate your skills/tools with recovery hints
+
+If your project uses Gemini CLI skills or custom tools, add a `## Recovery` section to each skill's `SKILL.md` or tool description. The agent will read this as part of its context when it resumes. Include:
+
+- **Idempotency:** is it safe to call this tool twice with the same arguments?
+- **Verification:** what read-only check confirms whether the operation completed?
+- **Partial failure:** are there side effects that may have occurred even if the tool didn't return?
+
+Example for a `deploy_service` skill:
+
+```markdown
+## Recovery
+
+- **Idempotent:** No. Deploying twice may create duplicate resources.
+- **Verify completion:** Run `get_deployment_status(service_id)` and check for status `RUNNING`.
+  If status is `PENDING` or absent, the deploy did not complete.
+- **Partial failure risk:** IAM role may have been created even if the deployment failed.
+  Run `list_iam_roles()` and check before retrying.
+```
+
+Example for a `write_report` skill that writes a file:
+
+```markdown
+## Recovery
+
+- **Idempotent:** Yes. Writing the same report twice produces the same file.
+- **Verify completion:** Read the output file and check it is non-empty and contains the expected header.
+```
+
+### Option 2: Extend `GEMINI.md` with project-specific rules
+
+`GEMINI.md` is loaded as system context on every session, not just recovery. You can append a project-specific table that overrides or extends the generic classification in the recovery protocol:
+
+```markdown
+## Project-Specific Tool Classification
+
+| Tool / Operation | Idempotent? | Verify With | On Ambiguity |
+|---|---|---|---|
+| `run_shell_command` → `make build` | Yes | Check build artifacts exist and are newer than sources | Retry |
+| `run_shell_command` → `git push` | No | `git log origin/main..HEAD` — empty means push succeeded | Ask operator |
+| `run_shell_command` → `terraform apply` | No | `terraform plan` — no changes means apply completed | Ask operator |
+| `write_file` | Yes | Read file and verify contents match | Retry |
+| `delete_file` | Yes | Check file no longer exists | Continue |
+| `run_shell_command` → `psql ... INSERT` | No | `SELECT` the inserted row by primary key | Ask operator |
+```
+
+### What the agent does with this information
+
+On recovery the agent follows `GEMINI.md` step-by-step:
+
+1. Identifies the last in-flight tool call from the recovered history
+2. Looks up the tool in the project-specific table (if present), or falls back to the generic classification
+3. Runs the specified verification command
+4. Retries, skips, or halts based on the result
+
+The more precisely you describe verification steps, the less likely the agent is to either blindly retry a destructive operation or unnecessarily halt and wait for a human.
+
+---
+
 ## Tuning hook performance (optional)
 
 By default, `wal-sync.sh` is registered as both a `BeforeTool` and `AfterTool` hook, firing on every tool call. The `BeforeTool` sync captures state just before a mutating tool runs — so if the VM crashes mid-execution, the bucket reflects what the agent was about to do.
