@@ -55,6 +55,33 @@ vm-wrapper.sh [gemini-cli-args...]
 
 ---
 
+## Tuning hook performance (optional)
+
+By default, `wal-sync.sh` is registered as both a `BeforeTool` and `AfterTool` hook, firing on every tool call. The `BeforeTool` sync captures state just before a mutating tool runs — so if the VM crashes mid-execution, the bucket reflects what the agent was about to do.
+
+For read-only tools (file reads, searches, web fetches) the `BeforeTool` sync is unnecessary: no state changes, so there's nothing new to capture. If you want to skip the presync for specific tools, `configure-hooks.sh` manages a denylist in your `.gemini/settings.json`:
+
+```bash
+# Skip presync for common read-only tools
+bash scripts/configure-hooks.sh --skip read_file,list_directory,glob,grep,search_file_content
+
+# Add or remove individual tools later
+bash scripts/configure-hooks.sh --skip web_fetch
+bash scripts/configure-hooks.sh --unskip glob
+
+# See what's currently excluded
+bash scripts/configure-hooks.sh --show
+
+# Go back to syncing before every tool call
+bash scripts/configure-hooks.sh --reset
+```
+
+**This is a tradeoff.** With a denylist you save ~1.5s per excluded tool call, but if a tool you marked as read-only turns out to write state (e.g. a shell command that also modifies files), the `BeforeTool` sync is silently skipped. Only use this if you have a well-understood, stable tool set and the latency savings matter.
+
+The `AfterTool` hook is never modified by `configure-hooks.sh` — it always fires for every tool, regardless of denylist settings.
+
+---
+
 ## Environment variables
 
 | Variable | Default | Description |
