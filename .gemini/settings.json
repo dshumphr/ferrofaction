@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "wal-presync",
+            "type": "command",
+            "command": "/usr/local/bin/wal-sync.sh"
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "wal-postsync",
+            "type": "command",
+            "command": "/usr/local/bin/wal-sync.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
