@@ -88,6 +88,8 @@ Example for a `write_report` skill that writes a file:
 - **Verify completion:** Read the output file and check it is non-empty and contains the expected header.
 ```
 
+NOTE: Equally, you could create a separate skill for recovery (eg. write_report_recovery) to minimize context for normal skill use.
+
 ### Option 2: Extend `GEMINI.md` with project-specific rules
 
 `GEMINI.md` is loaded as system context on every session, not just recovery. You can append a project-specific table that overrides or extends the generic classification in the recovery protocol:
@@ -122,7 +124,7 @@ The more precisely you describe verification steps, the less likely the agent is
 
 By default, `wal-sync.sh` is registered as both a `BeforeTool` and `AfterTool` hook, firing on every tool call. The `BeforeTool` sync captures state just before a mutating tool runs — so if the VM crashes mid-execution, the bucket reflects what the agent was about to do.
 
-For read-only tools (file reads, searches, web fetches) the `BeforeTool` sync is unnecessary: no state changes, so there's nothing new to capture. If you want to skip the presync for specific tools, `configure-hooks.sh` manages a denylist in your `.gemini/settings.json`:
+For cheap, fast, idempotent tools - like read-only tools (file reads, searches, web fetches) the `BeforeTool` sync is unnecessary: no state changes, so there's nothing new to capture. If you want to skip the presync for specific tools, `configure-hooks.sh` manages a denylist in your `.gemini/settings.json`:
 
 ```bash
 # Skip presync for common read-only tools
