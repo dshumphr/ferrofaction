@@ -2,12 +2,12 @@
 # bench.sh: Measures per-tool-call latency overhead introduced by ferrofaction WAL hooks.
 #
 # Runs N iterations of a fixed 5-tool-call session in two modes:
-#   - WITH hooks:    gemini run from REPO_ROOT (settings.json hooks active)
-#   - WITHOUT hooks: gemini run from WORK_DIR (no settings.json, no hooks)
+#   - WITH hooks:    gemini run from HOOKS_DIR (contains .gemini/settings.json)
+#   - WITHOUT hooks: gemini run from PLAIN_DIR (no .gemini/settings.json)
 #
-# WORK_DIR is warmed up with a throwaway session before timing begins to
-# eliminate first-run initialization bias. Order within each iteration is
-# randomized to avoid systematic ordering effects.
+# Both dirs are fresh temp directories treated identically by gemini,
+# so first-run initialization cost is equal across both conditions.
+# Order within each iteration is randomized to avoid systematic bias.
 #
 # At the end, prints per-iteration timings and summary statistics (mean, min, max).
 #
@@ -26,10 +26,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ITERATIONS="${1:-3}"
 BUCKET="${FERROFACTION_BUCKET:-gs://ferrofaction-test/agent}"
 LOCAL_STATE="${FERROFACTION_LOCAL_STATE:-$HOME/.gemini/tmp/ferrofaction/chats}"
-WORK_DIR="$(mktemp -d)"
+HOOKS_DIR="$(mktemp -d)"
+PLAIN_DIR="$(mktemp -d)"
+
+# Inject settings.json into the hooked dir only
+mkdir -p "$HOOKS_DIR/.gemini"
+cp "$REPO_ROOT/.gemini/settings.json" "$HOOKS_DIR/.gemini/settings.json"
 
 cleanup() {
-    rm -rf "$WORK_DIR"
+    rm -rf "$HOOKS_DIR" "$PLAIN_DIR"
     rm -f "$REPO_ROOT"/perf-{a,b,c}.txt
 }
 trap cleanup EXIT
@@ -69,29 +74,13 @@ clear_bucket() {
     gcloud storage rm --recursive "$BUCKET/" 2>/dev/null || true
 }
 
-# ── warmup ────────────────────────────────────────────────────────────────────
+# ── main ──────────────────────────────────────────────────────────────────────
 
 echo "ferrofaction bench — $ITERATIONS iterations × 2 modes (with/without hooks)"
-echo "Bucket: $BUCKET"
-echo "Repo:   $REPO_ROOT"
-echo "WorkDir: $WORK_DIR"
+echo "Bucket:   $BUCKET"
+echo "HooksDir: $HOOKS_DIR"
+echo "PlainDir: $PLAIN_DIR"
 echo
-echo "Registering WORK_DIR as a known gemini project (eliminating first-run init bias)..."
-PROJECTS_FILE="$HOME/.gemini/projects.json"
-REAL_WORK_DIR="$(python3 -c "import os; print(os.path.realpath('$WORK_DIR'))")"
-python3 - "$PROJECTS_FILE" "$REAL_WORK_DIR" <<'EOF'
-import json, sys, os
-path, new_dir = sys.argv[1], sys.argv[2]
-data = json.load(open(path)) if os.path.exists(path) else {"projects": {}}
-# derive a project name the same way gemini does: basename of the path
-name = os.path.basename(new_dir)
-data["projects"][new_dir] = name
-json.dump(data, open(path, "w"), indent=4)
-print(f"  registered {new_dir} as '{name}'")
-EOF
-echo
-
-# ── main ──────────────────────────────────────────────────────────────────────
 
 WITH_TIMES=()
 WITHOUT_TIMES=()
@@ -111,11 +100,11 @@ for i in $(seq 1 "$ITERATIONS"); do
         if [ "$mode" = "with" ]; then
             clear_bucket
             echo -n "  with hooks:    "
-            t=$(cd "$REPO_ROOT" && run_timed gemini -y --output-format text -p "$PROMPT")
+            t=$(cd "$HOOKS_DIR" && run_timed gemini -y --output-format text -p "$PROMPT")
             WITH_TIMES+=("$t")
         else
             echo -n "  without hooks: "
-            t=$(cd "$WORK_DIR" && run_timed gemini -y --output-format text -p "$PROMPT")
+            t=$(cd "$PLAIN_DIR" && run_timed gemini -y --output-format text -p "$PROMPT")
             WITHOUT_TIMES+=("$t")
         fi
         echo "${t}s"
